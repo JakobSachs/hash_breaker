@@ -4,6 +4,7 @@
 // - Build out profiling
 // - Add more flags to allow the user to specify the range of characters to check
 // - Add a flag to specify the hash algorithm to test
+//
 
 package main
 
@@ -23,11 +24,19 @@ import (
 
 const HASHRATE_UPDATE_INTERVAL = 300 * time.Millisecond
 
+type Flags struct {
+	Profile bool
+	Log     bool
+	Length  int
+	Workers int
+}
+
 // private function to register flags and parse them
 func _registerFlags() Flags {
 	profilerFlg := flag.Bool("profile", false, "Enable code profiling")
 	lengthFlg := flag.Int("l", 4, "Length of the string to check")
 	workersFlg := flag.Int("w", 8, "Number of workers to use")
+	logFlg := flag.Bool("log", false, "Enable logging")
 	// add other flags ...
 
 	// parse
@@ -37,11 +46,11 @@ func _registerFlags() Flags {
 		Profile: *profilerFlg,
 		Length:  *lengthFlg,
 		Workers: *workersFlg,
+		Log:     *logFlg,
 	}
 }
 
 func _printHashRate(gs *GlobalState) {
-
 	for {
 		// if done, exit the goroutine
 		if atomic.LoadInt32(&gs.Done) == 1 {
@@ -53,7 +62,8 @@ func _printHashRate(gs *GlobalState) {
 
 		// load the current hash count
 		count := atomic.LoadInt64(&gs.HashCounter)
-		countPerSec := 1000 * float32(count) / float32(HASHRATE_UPDATE_INTERVAL.Milliseconds())
+		rawCountPerSec := 1000 * float32(count) / float32(HASHRATE_UPDATE_INTERVAL.Milliseconds())
+		countPerSec := rawCountPerSec
 		// humanize rate
 		var unit string
 		if countPerSec > 1000000 {
@@ -68,6 +78,11 @@ func _printHashRate(gs *GlobalState) {
 
 		// print the hash rate
 		fmt.Printf("\r Working...\t(%6.2f%s/s)", countPerSec, unit)
+
+		if gs.Flags.Log {
+			fmt.Fprintf(gs.LogFile, "%f\n", rawCountPerSec)
+		}
+
 		// reset the hash count
 		atomic.StoreInt64(&gs.HashCounter, 0)
 	}
@@ -77,7 +92,6 @@ func _printHashRate(gs *GlobalState) {
 // the start and end of the range of characters to be checked
 type HashJob struct {
 	Start rune
-	Flags Flags
 }
 
 type GlobalState struct {
@@ -85,12 +99,8 @@ type GlobalState struct {
 	TargetHash  *[]byte
 	Done        int32 // atomic bool
 	HashCounter int64 // atomic int
-}
-
-type Flags struct {
-	Profile bool
-	Length  int
-	Workers int
+	Flags       Flags
+	LogFile     *os.File
 }
 
 // worker is a function that takes a channel of HashJobs and
@@ -119,7 +129,7 @@ func worker(jobs <-chan HashJob, gs *GlobalState) {
 			queue = queue[1:]
 
 			// Check if string is already our max length
-			if len(str) != job.Flags.Length {
+			if len(str) != gs.Flags.Length {
 				// if not the same length, iterate through all possible characters
 				// and add them to the queue
 				for i := '0'; i < 'z'; i++ {
@@ -137,7 +147,7 @@ func worker(jobs <-chan HashJob, gs *GlobalState) {
 
 			// Check if we have a match
 			if reflect.DeepEqual(h, *gs.TargetHash) {
-				fmt.Println("Found match:", str)
+				fmt.Println("\n✅ Found match:", str)
 				atomic.StoreInt32(&gs.Done, 1)
 				return
 			}
@@ -157,6 +167,23 @@ func main() {
 		flag.PrintDefaults()
 		os.Exit(1)
 		return
+	}
+
+	f := os.File{}
+	// if logging is enabled, create a file to log to
+	if flags.Log {
+		//get timestamp
+		t := time.Now()
+		timestamp := t.Format("2006-01-02-15-04-05")
+		log_path := "log-" + timestamp + ".txt"
+
+		f, err := os.Create(log_path)
+		if err != nil {
+			fmt.Println("Error creating log file:", err)
+			os.Exit(1)
+			return
+		}
+		defer f.Close()
 	}
 
 	// decode the hex string
@@ -187,6 +214,7 @@ func main() {
 	gs.WaitGroup = &wg
 	gs.TargetHash = &h
 	gs.Done = 0
+	gs.LogFile = &f
 
 	// start workers
 	for i := 0; i < flags.Workers; i++ {
@@ -195,7 +223,7 @@ func main() {
 	}
 
 	for i := '0'; i < 'z'; i++ {
-		jobs <- HashJob{i, flags}
+		jobs <- HashJob{i}
 	}
 	// close the jobs channel
 	close(jobs)
@@ -206,6 +234,6 @@ func main() {
 	wg.Wait()
 
 	if gs.Done == 0 {
-		fmt.Println("No match found, try increasing the length of the string to check")
+		fmt.Println("❌ No match found, try increasing the length of the string to check (use -l flag)")
 	}
 }
