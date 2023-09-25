@@ -1,3 +1,10 @@
+//
+// TODOs:
+//
+// - Build out profiling
+// - Add more flags to allow the user to specify the range of characters to check
+// - Add a flag to specify the hash algorithm to test
+
 package main
 
 import (
@@ -9,15 +16,18 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/profile"
 )
 
+const HASHRATE_UPDATE_INTERVAL = 300 * time.Millisecond
+
 // private function to register flags and parse them
 func _registerFlags() Flags {
-
 	profilerFlg := flag.Bool("profile", false, "Enable code profiling")
 	lengthFlg := flag.Int("l", 4, "Length of the string to check")
+	workersFlg := flag.Int("w", 8, "Number of workers to use")
 	// add other flags ...
 
 	// parse
@@ -26,6 +36,40 @@ func _registerFlags() Flags {
 	return Flags{
 		Profile: *profilerFlg,
 		Length:  *lengthFlg,
+		Workers: *workersFlg,
+	}
+}
+
+func _printHashRate(gs *GlobalState) {
+
+	for {
+		// if done, exit the goroutine
+		if atomic.LoadInt32(&gs.Done) == 1 {
+			fmt.Println()
+			return
+		}
+		// sleep
+		time.Sleep(HASHRATE_UPDATE_INTERVAL)
+
+		// load the current hash count
+		count := atomic.LoadInt64(&gs.HashCounter)
+		countPerSec := 1000 * float32(count) / float32(HASHRATE_UPDATE_INTERVAL.Milliseconds())
+		// humanize rate
+		var unit string
+		if countPerSec > 1000000 {
+			countPerSec /= 1000000
+			unit = "M"
+		} else if countPerSec > 1000 {
+			countPerSec /= 1000
+			unit = "K"
+		}
+
+		unit += "Hsh"
+
+		// print the hash rate
+		fmt.Printf("\r Working...\t(%6.2f%s/s)", countPerSec, unit)
+		// reset the hash count
+		atomic.StoreInt64(&gs.HashCounter, 0)
 	}
 }
 
@@ -37,14 +81,16 @@ type HashJob struct {
 }
 
 type GlobalState struct {
-	WaitGroup  *sync.WaitGroup
-	TargetHash *[]byte
-	Done       int32 // atomic bool
+	WaitGroup   *sync.WaitGroup
+	TargetHash  *[]byte
+	Done        int32 // atomic bool
+	HashCounter int64 // atomic int
 }
 
 type Flags struct {
 	Profile bool
 	Length  int
+	Workers int
 }
 
 // worker is a function that takes a channel of HashJobs and
@@ -86,6 +132,10 @@ func worker(jobs <-chan HashJob, gs *GlobalState) {
 			hasher.Write([]byte(str))
 			h := hasher.Sum(nil)
 
+			// increment the counter
+			atomic.AddInt64(&gs.HashCounter, 1)
+
+			// Check if we have a match
 			if reflect.DeepEqual(h, *gs.TargetHash) {
 				fmt.Println("Found match:", str)
 				atomic.StoreInt32(&gs.Done, 1)
@@ -138,10 +188,8 @@ func main() {
 	gs.TargetHash = &h
 	gs.Done = 0
 
-	fmt.Println("Target hash:", hex.EncodeToString(h))
-
-	// start 8 workers
-	for i := 0; i < 8; i++ {
+	// start workers
+	for i := 0; i < flags.Workers; i++ {
 		wg.Add(1)
 		go worker(jobs, &gs)
 	}
@@ -151,6 +199,8 @@ func main() {
 	}
 	// close the jobs channel
 	close(jobs)
+
+	go _printHashRate(&gs)
 
 	// wait for all workers to finish
 	wg.Wait()
