@@ -1,7 +1,6 @@
 //
 // TODOs:
 //
-// - Build out profiling
 // - Add more flags to allow the user to specify the range of characters to check
 // - Add a flag to specify the hash algorithm to test
 //
@@ -9,7 +8,10 @@
 package main
 
 import (
+	"crypto/md5"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -18,35 +20,33 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/pkg/profile"
 )
 
 const HASHRATE_UPDATE_INTERVAL = 300 * time.Millisecond
 
 type Flags struct {
-	Profile bool
-	Log     bool
-	Length  int
-	Workers int
+	Encryption string
+	Log        bool
+	Length     int
+	Workers    int
 }
 
 // private function to register flags and parse them
 func _registerFlags() Flags {
-	profilerFlg := flag.Bool("profile", false, "Enable code profiling")
 	lengthFlg := flag.Int("l", 4, "Length of the string to check")
 	workersFlg := flag.Int("w", 8, "Number of workers to use")
 	logFlg := flag.Bool("log", false, "Enable logging")
-	// add other flags ...
+
+	encrFlag := flag.String("e", "sha256", "Encryption algorithm to use,\n valid options are: sha1, sha256, sha512, md5")
 
 	// parse
 	flag.Parse()
 
 	return Flags{
-		Profile: *profilerFlg,
-		Length:  *lengthFlg,
-		Workers: *workersFlg,
-		Log:     *logFlg,
+		Encryption: *encrFlag,
+		Length:     *lengthFlg,
+		Workers:    *workersFlg,
+		Log:        *logFlg,
 	}
 }
 
@@ -80,7 +80,13 @@ func _printHashRate(gs *GlobalState) {
 		fmt.Printf("\r Working...\t(%6.2f%s/s)", countPerSec, unit)
 
 		if gs.Flags.Log {
-			fmt.Fprintf(gs.LogFile, "%f\n", rawCountPerSec)
+			str := fmt.Sprintf("%6.2f\n", rawCountPerSec)
+			_, err := gs.LogFile.WriteString(str)
+			if err != nil {
+				fmt.Println("Error writing to log file:", err)
+				return
+			}
+
 		}
 
 		// reset the hash count
@@ -97,6 +103,7 @@ type HashJob struct {
 type GlobalState struct {
 	WaitGroup   *sync.WaitGroup
 	TargetHash  *[]byte
+	HashFunc    func([]byte) []byte
 	Done        int32 // atomic bool
 	HashCounter int64 // atomic int
 	Flags       Flags
@@ -137,10 +144,7 @@ func worker(jobs <-chan HashJob, gs *GlobalState) {
 				}
 
 			}
-			// check the hash
-			hasher := sha256.New()
-			hasher.Write([]byte(str))
-			h := hasher.Sum(nil)
+			h := gs.HashFunc([]byte(str))
 
 			// increment the counter
 			atomic.AddInt64(&gs.HashCounter, 1)
@@ -169,23 +173,6 @@ func main() {
 		return
 	}
 
-	f := os.File{}
-	// if logging is enabled, create a file to log to
-	if flags.Log {
-		//get timestamp
-		t := time.Now()
-		timestamp := t.Format("2006-01-02-15-04-05")
-		log_path := "log-" + timestamp + ".txt"
-
-		f, err := os.Create(log_path)
-		if err != nil {
-			fmt.Println("Error creating log file:", err)
-			os.Exit(1)
-			return
-		}
-		defer f.Close()
-	}
-
 	// decode the hex string
 	hStr := flag.Arg(0)
 	h, err := hex.DecodeString(hStr)
@@ -193,13 +180,6 @@ func main() {
 		fmt.Println("Error decoding hex string:", err)
 		os.Exit(1)
 		return
-	}
-
-	// check if we ought to be profiling
-	if flags.Profile {
-		defer profile.Start(
-			profile.MemProfile,
-		).Stop()
 	}
 
 	// Create a channel to receive jobs
@@ -214,7 +194,61 @@ func main() {
 	gs.WaitGroup = &wg
 	gs.TargetHash = &h
 	gs.Done = 0
-	gs.LogFile = &f
+	gs.Flags = flags
+
+	// if logging is enabled, create a file to log to
+	if flags.Log {
+		//get timestamp
+		t := time.Now()
+		timestamp := t.Format("2006-01-02-15-04-05")
+		// get pwd
+		pwd, err := os.Getwd()
+		if err != nil {
+			fmt.Println("Error getting pwd:", err)
+			os.Exit(1)
+			return
+		}
+
+		log_path := pwd + "/log-" + timestamp + ".txt"
+
+		// create log file
+		f, err := os.Create(log_path)
+		if err != nil {
+			fmt.Println("Error creating log file:", err)
+			os.Exit(1)
+			return
+		}
+		defer f.Close()
+		gs.LogFile = f
+	}
+
+	// set the hassh function
+	switch flags.Encryption {
+	case "sha256": // sha256 func (default)
+		gs.HashFunc = func(b []byte) []byte {
+			hash := sha256.Sum256(b)
+			return hash[:]
+		}
+	case "sha512": // sha512 func
+		gs.HashFunc = func(b []byte) []byte {
+			hash := sha512.Sum512(b)
+			return hash[:]
+		}
+	case "md5": // md5 func
+		gs.HashFunc = func(b []byte) []byte {
+			hash := md5.Sum(b)
+			return hash[:]
+		}
+	case "sha1": // sha1 func
+		gs.HashFunc = func(b []byte) []byte {
+			hash := sha1.Sum(b)
+			return hash[:]
+		}
+	default: // invalid func
+		fmt.Println("Invalid encryption algorithm:", flags.Encryption)
+		os.Exit(1)
+		return
+	}
 
 	// start workers
 	for i := 0; i < flags.Workers; i++ {
