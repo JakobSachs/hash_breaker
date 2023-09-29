@@ -2,7 +2,6 @@
 // TODOs:
 //
 // - Add more flags to allow the user to specify the range of characters to check
-// - Add a flag to specify the hash algorithm to test
 //
 
 package main
