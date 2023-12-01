@@ -1,5 +1,5 @@
 # hash-breaker.go
-A GoLang CLI program to reverce calculate a given hash code. Utilizes concurrent workers to speed up the hash breaking process.
+A GoLang CLI program to reverse calculate a given hash code. Utilizes concurrent workers to speed up the hash breaking process.
 
 ## 🚀 Getting Started
 
